@@ -25,7 +25,7 @@
       <template #extension>
 
         <v-tabs v-model="tab" align-tabs="title">
-          <v-tab v-for="tabDefinition in tabDefinitions" :key="tabDefinition.key" :value="tabDefinition.key">
+          <v-tab v-for="tabDefinition in availableTabs" :key="tabDefinition.id" :value="tabDefinition.id">
             {{ tabDefinition.label }}
           </v-tab>
         </v-tabs>
@@ -59,12 +59,12 @@
       <v-progress-linear v-show="!metricsReady" indeterminate color="indigo" />
       <v-window v-show="metricsReady && metrics.length" v-model="tab">
         <v-window-item
-          v-for="tabDefinition in tabDefinitions"
-          :key="tabDefinition.key"
-          :value="tabDefinition.key"
+          v-for="tabDefinition in availableTabs"
+          :key="tabDefinition.id"
+          :value="tabDefinition.id"
         >
           <v-card flat>
-            <component :is="tabDefinition.component" v-bind="tabDefinition.getProps()" />
+            <component :is="tabDefinition.component" v-bind="tabDefinition.props" />
           </v-card>
         </v-window-item>
         <v-alert
@@ -95,11 +95,21 @@ import CopilotChatViewer from './CopilotChatViewer.vue'
 import SeatsAnalysisViewer from './SeatsAnalysisViewer.vue'
 import ApiResponse from './ApiResponse.vue'
 
-type TabDefinition = {
-  key: string;
-  label: string;
+type TabContext = {
+  metrics: Metrics[];
+  originalMetrics: CopilotMetrics[];
+  seats: Seat[];
+  primaryTabLabel: string;
+  metricsReady: boolean;
+  seatsReady: boolean;
+};
+
+type TabSpec = {
+  id: string;
+  label: string | ((context: TabContext) => string);
   component: Component;
-  getProps: () => Record<string, unknown>;
+  props: (context: TabContext) => Record<string, unknown>;
+  isAvailable?: (context: TabContext) => boolean;
 };
 
 export default defineNuxtComponent({
@@ -193,60 +203,92 @@ export default defineNuxtComponent({
 
     const tab = ref<string | null>(null);
 
-    const tabDefinitions = computed<TabDefinition[]>(() => [
+    const tabContext = computed<TabContext>(() => ({
+      metrics: metrics.value,
+      originalMetrics: originalMetrics.value,
+      seats: seats.value,
+      primaryTabLabel: primaryTabLabel.value,
+      metricsReady: metricsReady.value,
+      seatsReady: seatsReady.value
+    }));
+
+    const tabRegistry: TabSpec[] = [
       {
-        key: primaryTabLabel.value,
-        label: primaryTabLabel.value,
+        id: 'metrics',
+        label: (context) => context.primaryTabLabel,
         component: MetricsViewer,
-        getProps: () => ({ metrics: metrics.value })
+        props: (context) => ({ metrics: context.metrics }),
+        isAvailable: (context) => context.metricsReady
       },
       {
-        key: 'languages',
+        id: 'languages',
         label: 'languages',
         component: BreakdownComponent,
-        getProps: () => ({ metrics: metrics.value, breakdownKey: 'language' })
+        props: (context) => ({ metrics: context.metrics, breakdownKey: 'language' }),
+        isAvailable: (context) => context.metricsReady && context.metrics.length > 0
       },
       {
-        key: 'editors',
+        id: 'editors',
         label: 'editors',
         component: BreakdownComponent,
-        getProps: () => ({ metrics: metrics.value, breakdownKey: 'editor' })
+        props: (context) => ({ metrics: context.metrics, breakdownKey: 'editor' }),
+        isAvailable: (context) => context.metricsReady && context.metrics.length > 0
       },
       {
-        key: 'copilot chat',
+        id: 'copilot-chat',
         label: 'copilot chat',
         component: CopilotChatViewer,
-        getProps: () => ({ metrics: metrics.value })
+        props: (context) => ({ metrics: context.metrics }),
+        isAvailable: (context) => context.metricsReady && context.metrics.length > 0
       },
       {
-        key: 'seat analysis',
+        id: 'seat-analysis',
         label: 'seat analysis',
         component: SeatsAnalysisViewer,
-        getProps: () => ({ seats: seats.value })
+        props: (context) => ({ seats: context.seats }),
+        isAvailable: (context) => context.seatsReady
       },
       {
-        key: 'api response',
+        id: 'api-response',
         label: 'api response',
         component: ApiResponse,
-        getProps: () => ({ metrics: metrics.value, originalMetrics: originalMetrics.value, seats: seats.value })
+        props: (context) => ({
+          metrics: context.metrics,
+          originalMetrics: context.originalMetrics,
+          seats: context.seats
+        }),
+        isAvailable: (context) => context.metricsReady || context.seatsReady
       }
-    ]);
+    ];
+
+    const availableTabs = computed(() => {
+      const context = tabContext.value;
+
+      return tabRegistry
+        .filter((tabSpec) => tabSpec.isAvailable ? tabSpec.isAvailable(context) : true)
+        .map((tabSpec) => ({
+          id: tabSpec.id,
+          label: typeof tabSpec.label === 'function' ? tabSpec.label(context) : tabSpec.label,
+          component: tabSpec.component,
+          props: tabSpec.props(context)
+        }));
+    });
 
     watchEffect(() => {
-      if (!tab.value && tabDefinitions.value.length) {
-        tab.value = tabDefinitions.value[0].key;
+      if (!tab.value && availableTabs.value.length) {
+        tab.value = availableTabs.value[0].id;
       }
     });
 
-    watch(tabDefinitions, (definitions) => {
+    watch(availableTabs, (definitions) => {
       if (!definitions.length) {
         tab.value = null;
         return;
       }
 
-      const hasActiveTab = definitions.some((definition) => definition.key === tab.value);
+      const hasActiveTab = definitions.some((definition) => definition.id === tab.value);
       if (!hasActiveTab) {
-        tab.value = definitions[0].key;
+        tab.value = definitions[0].id;
       }
     });
 
@@ -265,7 +307,7 @@ export default defineNuxtComponent({
       displayName,
       user,
       tab,
-      tabDefinitions
+      availableTabs
     };
   },
 })
