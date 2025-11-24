@@ -25,8 +25,8 @@
       <template #extension>
 
         <v-tabs v-model="tab" align-tabs="title">
-          <v-tab v-for="item in tabItems" :key="item" :value="item">
-            {{ item }}
+          <v-tab v-for="tabDefinition in tabDefinitions" :key="tabDefinition.key" :value="tabDefinition.key">
+            {{ tabDefinition.label }}
           </v-tab>
         </v-tabs>
 
@@ -39,8 +39,13 @@
     <AuthState>
       <template #default="{ loggedIn }">
         <div v-show="signInRequired" class="github-login-container">
-          <NuxtLink v-if="!loggedIn && signInRequired" to="/auth/github" external class="github-login-button"> <v-icon
-              left>mdi-github</v-icon>
+          <NuxtLink
+            v-if="!loggedIn && signInRequired"
+            to="/auth/github"
+            external
+            class="github-login-button"
+          >
+            <v-icon left>mdi-github</v-icon>
             Sign in with GitHub</NuxtLink>
         </div>
       </template>
@@ -53,21 +58,22 @@
     <div v-show="!apiError">
       <v-progress-linear v-show="!metricsReady" indeterminate color="indigo" />
       <v-window v-show="metricsReady && metrics.length" v-model="tab">
-        <v-window-item v-for="item in tabItems" :key="item" :value="item">
+        <v-window-item
+          v-for="tabDefinition in tabDefinitions"
+          :key="tabDefinition.key"
+          :value="tabDefinition.key"
+        >
           <v-card flat>
-            <MetricsViewer v-if="item === itemName" :metrics="metrics" />
-            <BreakdownComponent v-if="item === 'languages'" :metrics="metrics" :breakdown-key="'language'" />
-            <BreakdownComponent v-if="item === 'editors'" :metrics="metrics" :breakdown-key="'editor'" />
-            <CopilotChatViewer v-if="item === 'copilot chat'" :metrics="metrics" />
-            <SeatsAnalysisViewer v-if="item === 'seat analysis'" :seats="seats" />
-            <ApiResponse
-v-if="item === 'api response'" :metrics="metrics" :original-metrics="originalMetrics"
-              :seats="seats" />
+            <component :is="tabDefinition.component" v-bind="tabDefinition.getProps()" />
           </v-card>
         </v-window-item>
         <v-alert
-v-show="metricsReady && metrics.length == 0" density="compact" text="No data available to display"
-          title="No data" type="warning" />
+          v-show="metricsReady && metrics.length == 0"
+          density="compact"
+          text="No data available to display"
+          title="No data"
+          type="warning"
+        />
       </v-window>
 
     </div>
@@ -75,11 +81,12 @@ v-show="metricsReady && metrics.length == 0" density="compact" text="No data ava
   </div>
 </template>
 <script lang='ts'>
+import type { Component } from 'vue';
 import type { Metrics } from '@/model/Metrics';
 import type { CopilotMetrics } from '@/model/Copilot_Metrics';
 import type { MetricsApiResponse } from '@/types/metricsApiResponse';
 import type { Seat } from "@/model/Seat";
-import type { H3Error } from 'h3'
+import type { H3Error } from 'h3';
 
 //Components
 import MetricsViewer from './MetricsViewer.vue'
@@ -87,6 +94,13 @@ import BreakdownComponent from './BreakdownComponent.vue'
 import CopilotChatViewer from './CopilotChatViewer.vue'
 import SeatsAnalysisViewer from './SeatsAnalysisViewer.vue'
 import ApiResponse from './ApiResponse.vue'
+
+type TabDefinition = {
+  key: string;
+  label: string;
+  component: Component;
+  getProps: () => Record<string, unknown>;
+};
 
 export default defineNuxtComponent({
   name: 'MainComponent',
@@ -102,26 +116,17 @@ export default defineNuxtComponent({
       const { clear } = useUserSession()
       this.metrics = [];
       this.seats = [];
-      // console.log('metrics are now', this.metrics);
       clear();
     }
   },
 
-  data() {
-    return {
-      tabItems: ['languages', 'editors', 'copilot chat', 'seat analysis', 'api response'],
-      tab: null
-    }
-  },
-  created() {
-    this.tabItems.unshift(this.itemName);
-  },
   async setup() {
     const { loggedIn, user } = useUserSession()
     const config = useRuntimeConfig();
     const showLogoutButton = computed(() => config.public.usingGithubAuth && loggedIn.value);
     const mockedDataMessage = computed(() => config.public.isDataMocked ? 'Using mock data - see README if unintended' : '');
     const itemName = computed(() => config.public.scope);
+    const primaryTabLabel = computed(() => itemName.value || 'metrics');
     const githubInfo = getDisplayName(config.public)
     const displayName = computed(() => githubInfo);
 
@@ -186,6 +191,65 @@ export default defineNuxtComponent({
       seatsReady.value = true;
     }
 
+    const tab = ref<string | null>(null);
+
+    const tabDefinitions = computed<TabDefinition[]>(() => [
+      {
+        key: primaryTabLabel.value,
+        label: primaryTabLabel.value,
+        component: MetricsViewer,
+        getProps: () => ({ metrics: metrics.value })
+      },
+      {
+        key: 'languages',
+        label: 'languages',
+        component: BreakdownComponent,
+        getProps: () => ({ metrics: metrics.value, breakdownKey: 'language' })
+      },
+      {
+        key: 'editors',
+        label: 'editors',
+        component: BreakdownComponent,
+        getProps: () => ({ metrics: metrics.value, breakdownKey: 'editor' })
+      },
+      {
+        key: 'copilot chat',
+        label: 'copilot chat',
+        component: CopilotChatViewer,
+        getProps: () => ({ metrics: metrics.value })
+      },
+      {
+        key: 'seat analysis',
+        label: 'seat analysis',
+        component: SeatsAnalysisViewer,
+        getProps: () => ({ seats: seats.value })
+      },
+      {
+        key: 'api response',
+        label: 'api response',
+        component: ApiResponse,
+        getProps: () => ({ metrics: metrics.value, originalMetrics: originalMetrics.value, seats: seats.value })
+      }
+    ]);
+
+    watchEffect(() => {
+      if (!tab.value && tabDefinitions.value.length) {
+        tab.value = tabDefinitions.value[0].key;
+      }
+    });
+
+    watch(tabDefinitions, (definitions) => {
+      if (!definitions.length) {
+        tab.value = null;
+        return;
+      }
+
+      const hasActiveTab = definitions.some((definition) => definition.key === tab.value);
+      if (!hasActiveTab) {
+        tab.value = definitions[0].key;
+      }
+    });
+
     return {
       metricsReady,
       metrics,
@@ -199,7 +263,9 @@ export default defineNuxtComponent({
       mockedDataMessage,
       itemName,
       displayName,
-      user
+      user,
+      tab,
+      tabDefinitions
     };
   },
 })
