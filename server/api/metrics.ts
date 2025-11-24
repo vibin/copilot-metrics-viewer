@@ -1,73 +1,64 @@
 import type { CopilotMetrics } from "@/model/Copilot_Metrics";
 import { convertToMetrics } from '@/model/MetricsToUsageConverter';
 import type { MetricsApiResponse } from "@/types/metricsApiResponse";
-import type FetchError from 'ofetch';
-
-// TODO: use for storage https://unstorage.unjs.io/drivers/azure
-
-import { readFileSync } from 'fs';
 import { resolve } from 'path';
+import { GitHubApiClient, resolveEndpoint } from '../utils/copilotApiClient';
 
 export default defineEventHandler(async (event) => {
 
-    const logger = console;
-    const config = useRuntimeConfig(event);
-    let apiUrl = '';
-    let mockedDataPath: string;
+    const apiClient = new GitHubApiClient(event);
 
-    switch (event.context.scope) {
-        case 'team':
-            apiUrl = `https://api.github.com/orgs/${event.context.org}/team/${event.context.team}/copilot/metrics`;
+    const endpoint = resolveEndpoint(event.context.scope, {
+        team: ({ org, team }) => ({
+            url: `https://api.github.com/orgs/${org}/team/${team}/copilot/metrics`,
             // no team test data available, using org data
-            // '../../app/mock-data/organization_metrics_response_sample.json'
-            mockedDataPath = resolve('public/mock-data/organization_metrics_response_sample.json');
-            break;
-        case 'org':
-            apiUrl = `https://api.github.com/orgs/${event.context.org}/copilot/metrics`;
-            mockedDataPath = resolve('public/mock-data/organization_metrics_response_sample.json');
-            break;
-        case 'ent':
-            apiUrl = `https://api.github.com/enterprises/${event.context.ent}/copilot/metrics`;
-            mockedDataPath = resolve('public/mock-data/enterprise_metrics_response_sample.json');
-            break;
-        default:
-            return new Response('Invalid configuration/parameters for the request', { status: 400 });
+            mockPath: resolve('public/mock-data/organization_metrics_response_sample.json'),
+            description: 'metrics data'
+        }),
+        org: ({ org }) => ({
+            url: `https://api.github.com/orgs/${org}/copilot/metrics`,
+            mockPath: resolve('public/mock-data/organization_metrics_response_sample.json'),
+            description: 'metrics data'
+        }),
+        ent: ({ ent }) => ({
+            url: `https://api.github.com/enterprises/${ent}/copilot/metrics`,
+            mockPath: resolve('public/mock-data/enterprise_metrics_response_sample.json'),
+            description: 'metrics data'
+        })
+    }, event.context);
+
+    if (endpoint instanceof Response) {
+        return endpoint;
     }
 
-    if (config.public.isDataMocked && mockedDataPath) {
-        const path = mockedDataPath;
-        const data = readFileSync(path, 'utf8');
-        const dataJson = JSON.parse(data);
+    const mockResponse = apiClient.readMock(endpoint.mockPath, (data) => {
         // usage is the new API format
-        const usageData = ensureCopilotMetrics(dataJson);
-        // metrics is the old API format
-        const metricsData = convertToMetrics(usageData);
-
-        logger.info('Using mocked data');
-        return { metrics: metricsData, usage: usageData } as MetricsApiResponse;
-    }
-
-    if (!event.context.headers.has('Authorization')) {
-        logger.error('No Authentication provided');
-        return new Response('No Authentication provided', { status: 401 });
-    }
-
-    logger.info(`Fetching metrics data from ${apiUrl}`);
-
-    try {
-        const response = await $fetch(apiUrl, {
-            headers: event.context.headers
-        }) as unknown[];
-
-        // usage is the new API format
-        const usageData = ensureCopilotMetrics(response as CopilotMetrics[]);
+        const usageData = ensureCopilotMetrics(data as CopilotMetrics[]);
         // metrics is the old API format
         const metricsData = convertToMetrics(usageData);
         return { metrics: metricsData, usage: usageData } as MetricsApiResponse;
-    } catch (error: FetchError) {
-        logger.error('Error fetching metrics data:', error);
-        return new Response('Error fetching metrics data: ' + error, { status: error.statusCode || 500 });
+    });
+
+    if (mockResponse) {
+        return mockResponse;
     }
+
+    const authError = apiClient.ensureAuth();
+
+    if (authError) {
+        return authError;
+    }
+
+    const apiResponse = await apiClient.fetchJson(endpoint.url, {
+        description: endpoint.description,
+        transform: (response) => {
+            const usageData = ensureCopilotMetrics(response as CopilotMetrics[]);
+            const metricsData = convertToMetrics(usageData);
+            return { metrics: metricsData, usage: usageData } as MetricsApiResponse;
+        }
+    });
+
+    return apiResponse;
 })
 
 function ensureCopilotMetrics(data: CopilotMetrics[]): CopilotMetrics[] {

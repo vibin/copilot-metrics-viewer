@@ -1,79 +1,94 @@
 import { Seat } from "@/model/Seat";
-import type FetchError from 'ofetch';
-import { readFileSync } from 'fs';
 import { resolve } from 'path';
+import { GitHubApiClient, resolveEndpoint } from '../utils/copilotApiClient';
 
 export default defineEventHandler(async (event) => {
 
-  const logger = console;
-  const config = useRuntimeConfig(event);
-  let apiUrl = '';
-  let mockedDataPath: string;
+  const apiClient = new GitHubApiClient(event);
 
-  switch (event.context.scope) {
-    case 'team':
-    case 'org':
-      apiUrl = `https://api.github.com/orgs/${event.context.org}/copilot/billing/seats`;
-      mockedDataPath = resolve('public/mock-data/organization_seats_response_sample.json');
-      break;
-    case 'ent':
-      apiUrl = `https://api.github.com/enterprises/${event.context.ent}/copilot/billing/seats`;
-      mockedDataPath = resolve('public/mock-data/enterprise_seats_response_sample.json');
-      break;
-    default:
-      return new Response('Invalid configuration/parameters for the request', { status: 400 });
+  const endpoint = resolveEndpoint(event.context.scope, {
+    team: ({ org }) => ({
+      url: `https://api.github.com/orgs/${org}/copilot/billing/seats`,
+      mockPath: resolve('public/mock-data/organization_seats_response_sample.json'),
+      description: 'seats data'
+    }),
+    org: ({ org }) => ({
+      url: `https://api.github.com/orgs/${org}/copilot/billing/seats`,
+      mockPath: resolve('public/mock-data/organization_seats_response_sample.json'),
+      description: 'seats data'
+    }),
+    ent: ({ ent }) => ({
+      url: `https://api.github.com/enterprises/${ent}/copilot/billing/seats`,
+      mockPath: resolve('public/mock-data/enterprise_seats_response_sample.json'),
+      description: 'seats data'
+    })
+  }, event.context);
+
+  if (endpoint instanceof Response) {
+    return endpoint;
   }
 
-  if (config.public.isDataMocked && mockedDataPath) {
-    const path = mockedDataPath;
-    const data = readFileSync(path, 'utf8');
-    const dataJson = JSON.parse(data);
-    const seatsData = dataJson.seats.map((item: unknown) => new Seat(item));
+  const mockResponse = apiClient.readMock(endpoint.mockPath, (data) => {
+    const seatsJson = (data as { seats: unknown[] }).seats;
+    return seatsJson.map((item: unknown) => new Seat(item));
+  });
 
-    logger.info('Using mocked data');
-    return seatsData;
+  if (mockResponse) {
+    return mockResponse;
   }
 
-  if (!event.context.headers.has('Authorization')) {
-    logger.error('No Authentication provided');
-    return new Response('No Authentication provided', { status: 401 });
+  const authError = apiClient.ensureAuth();
+
+  if (authError) {
+    return authError;
   }
 
   const perPage = 100;
   let page = 1;
-  let response;
-  logger.info(`Fetching 1st page of seats data from ${apiUrl}`);
+  const firstPage = await apiClient.fetchJson(endpoint.url, {
+    description: `${endpoint.description} (page ${page})`,
+    params: {
+      per_page: perPage,
+      page: page
+    },
+    transform: (response) => {
+      const payload = response as { seats: unknown[], total_seats: number };
+      return {
+        seats: payload.seats.map((item: unknown) => new Seat(item)),
+        totalSeats: payload.total_seats
+      };
+    }
+  });
 
-  try {
-    response = await $fetch(apiUrl, {
-      headers: event.context.headers,
-      params: {
-        per_page: perPage,
-        page: page
-      }
-    }) as { seats: unknown[], total_seats: number };
-  } catch (error: FetchError) {
-    logger.error('Error fetching seats data:', error);
-    return new Response('Error fetching seats data. Error: ' + error, { status: error.statusCode || 500 });
+  if (firstPage instanceof Response) {
+    return firstPage;
   }
 
-  let seatsData = response.seats.map((item: unknown) => new Seat(item));
+  let seatsData = firstPage.seats;
 
   // Calculate the total pages
-  const totalSeats = response.total_seats;
+  const totalSeats = firstPage.totalSeats;
   const totalPages = Math.ceil(totalSeats / perPage);
 
   // Fetch the remaining pages
   for (page = 2; page <= totalPages; page++) {
-    response = await $fetch(apiUrl, {
-      headers: event.context.headers,
+    const nextPage = await apiClient.fetchJson(endpoint.url, {
+      description: `${endpoint.description} (page ${page})`,
       params: {
         per_page: perPage,
         page: page
+      },
+      transform: (response) => {
+        const payload = response as { seats: unknown[] };
+        return payload.seats.map((item: unknown) => new Seat(item));
       }
-    }) as { seats: unknown[], total_seats: number };
+    });
 
-    seatsData = seatsData.concat(response.seats.map((item: unknown) => new Seat(item)));
+    if (nextPage instanceof Response) {
+      return nextPage;
+    }
+
+    seatsData = seatsData.concat(nextPage);
   }
 
   return seatsData;
